@@ -2,12 +2,14 @@
 """Bootstrap TITAN PRO V80.1.2 inside Chaquopy Android."""
 from __future__ import annotations
 
+import io
 import os
 import sys
 import threading
 import time
 import traceback
 import urllib.request
+import zipfile
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -33,51 +35,47 @@ def _record_error(label: str) -> str:
     return _last_error
 
 
-def _materialize_titan_tree(files_dir: str, asset_python_root: Path) -> str:
-    """Copy titan/ from AssetFinder onto real FS so layer loader can open files."""
+def _read_asset_bytes(path: Path) -> bytes:
+    try:
+        if path.is_file():
+            return path.read_bytes()
+    except Exception:
+        pass
+    with open(str(path), "rb") as f:
+        return f.read()
+
+
+def _extract_layers(files_dir: str, asset_root: Path) -> str:
     dest_root = Path(files_dir) / "titan_materialized"
     marker = dest_root / "titan" / "runtime.py"
-    if marker.is_file() and marker.stat().st_size > 100:
+    core = dest_root / "titan" / "layers" / "core" / "bootstrap_storage.py"
+    if marker.is_file() and core.is_file() and marker.stat().st_size > 100:
         root = str(dest_root)
         if root not in sys.path:
             sys.path.insert(0, root)
         return root
 
-    def _listdir(p: Path):
+    dest_root.mkdir(parents=True, exist_ok=True)
+    extracted = False
+    for zp in [asset_root / "titan_layers.zip", Path(__file__).parent / "titan_layers.zip"]:
         try:
-            return os.listdir(str(p))
-        except Exception:
-            return None
+            data = _read_asset_bytes(zp)
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                zf.extractall(dest_root)
+            extracted = True
+            print(f"extracted layers zip from {zp}", flush=True)
+            break
+        except Exception as exc:
+            print(f"zip extract skip {zp}: {exc}", flush=True)
 
-    def copy_tree(src: Path, dst: Path) -> int:
-        names = _listdir(src)
-        if names is None:
-            return 0
-        dst.mkdir(parents=True, exist_ok=True)
-        n = 0
-        for name in names:
-            if name.startswith("__pycache__") or name.endswith(".pyc"):
-                continue
-            s = src / name
-            d = dst / name
-            child = _listdir(s)
-            if child is not None:
-                n += copy_tree(s, d)
-            else:
-                try:
-                    with open(str(s), "rb") as f:
-                        data = f.read()
-                    d.parent.mkdir(parents=True, exist_ok=True)
-                    with open(str(d), "wb") as f:
-                        f.write(data)
-                    n += 1
-                except Exception:
-                    pass
-        return n
+    if not extracted:
+        raise RuntimeError("titan_layers.zip missing or unreadable from APK assets")
 
-    src_titan = asset_python_root / "titan"
-    copied = copy_tree(src_titan, dest_root / "titan")
-    print(f"materialized titan files: {copied}", flush=True)
+    if not marker.is_file() or not core.is_file():
+        raise RuntimeError(
+            f"materialize incomplete runtime={marker.is_file()} core={core.is_file()}"
+        )
+
     root = str(dest_root)
     if root not in sys.path:
         sys.path.insert(0, root)
@@ -148,26 +146,21 @@ def start_titan(files_dir: str) -> str:
             if str(asset_root) not in sys.path:
                 sys.path.insert(0, str(asset_root))
 
-            mat = _materialize_titan_tree(str(home_root), asset_root)
+            mat = _extract_layers(str(home_root), asset_root)
             os.environ["TITAN_SRC_ROOT"] = mat
 
             def _run():
                 try:
-                    if mat and Path(mat, "titan", "runtime.py").is_file():
-                        if mat not in sys.path:
-                            sys.path.insert(0, mat)
-                        entry = str(Path(mat) / "titan" / "runtime.py")
-                        import importlib.util
-                        spec = importlib.util.spec_from_file_location("titan_runtime_mat", entry)
-                        mod = importlib.util.module_from_spec(spec)
-                        assert spec.loader is not None
-                        spec.loader.exec_module(mod)
-                        load = mod.load
-                    else:
-                        from titan.runtime import load
-                        entry = str(asset_root / "titan" / "runtime.py")
-
-                    ns = load(entry, as_main=True)
+                    entry = str(Path(mat) / "titan" / "runtime.py")
+                    if mat not in sys.path:
+                        sys.path.insert(0, mat)
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location("titan_runtime_mat", entry)
+                    mod = importlib.util.module_from_spec(spec)
+                    assert spec.loader is not None
+                    spec.loader.exec_module(mod)
+                    mod.LAYER_DIR = Path(mat) / "titan" / "layers"
+                    ns = mod.load(entry, as_main=True)
                     app = ns.get("app") if isinstance(ns, dict) else None
                     if app is not None:
                         host = os.environ.get("TITAN_HOST", "127.0.0.1")
