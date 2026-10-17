@@ -33,6 +33,57 @@ def _record_error(label: str) -> str:
     return _last_error
 
 
+def _materialize_titan_tree(files_dir: str, asset_python_root: Path) -> str:
+    """Copy titan/ from AssetFinder onto real FS so layer loader can open files."""
+    dest_root = Path(files_dir) / "titan_materialized"
+    marker = dest_root / "titan" / "runtime.py"
+    if marker.is_file() and marker.stat().st_size > 100:
+        root = str(dest_root)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        return root
+
+    def _listdir(p: Path):
+        try:
+            return os.listdir(str(p))
+        except Exception:
+            return None
+
+    def copy_tree(src: Path, dst: Path) -> int:
+        names = _listdir(src)
+        if names is None:
+            return 0
+        dst.mkdir(parents=True, exist_ok=True)
+        n = 0
+        for name in names:
+            if name.startswith("__pycache__") or name.endswith(".pyc"):
+                continue
+            s = src / name
+            d = dst / name
+            child = _listdir(s)
+            if child is not None:
+                n += copy_tree(s, d)
+            else:
+                try:
+                    with open(str(s), "rb") as f:
+                        data = f.read()
+                    d.parent.mkdir(parents=True, exist_ok=True)
+                    with open(str(d), "wb") as f:
+                        f.write(data)
+                    n += 1
+                except Exception:
+                    pass
+        return n
+
+    src_titan = asset_python_root / "titan"
+    copied = copy_tree(src_titan, dest_root / "titan")
+    print(f"materialized titan files: {copied}", flush=True)
+    root = str(dest_root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return root
+
+
 class _FallbackHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -93,23 +144,29 @@ def start_titan(files_dir: str) -> str:
             os.environ["TMP"] = str(home / "cache" / "tmp")
             os.environ["PYTHONUNBUFFERED"] = "1"
 
-            here = Path(__file__).resolve().parent
-            if str(here) not in sys.path:
-                sys.path.insert(0, str(here))
+            asset_root = Path(__file__).parent
+            if str(asset_root) not in sys.path:
+                sys.path.insert(0, str(asset_root))
 
-            try:
-                import titan  # noqa: F401
-                from titan import runtime as _rt  # noqa: F401
-            except Exception:
-                _record_error("Cannot import titan.runtime")
-                _start_fallback()
-                _started = True
-                return "fallback-no-import"
+            mat = _materialize_titan_tree(str(home_root), asset_root)
+            os.environ["TITAN_SRC_ROOT"] = mat
 
             def _run():
                 try:
-                    from titan.runtime import load
-                    entry = str(here / "titan" / "runtime.py")
+                    if mat and Path(mat, "titan", "runtime.py").is_file():
+                        if mat not in sys.path:
+                            sys.path.insert(0, mat)
+                        entry = str(Path(mat) / "titan" / "runtime.py")
+                        import importlib.util
+                        spec = importlib.util.spec_from_file_location("titan_runtime_mat", entry)
+                        mod = importlib.util.module_from_spec(spec)
+                        assert spec.loader is not None
+                        spec.loader.exec_module(mod)
+                        load = mod.load
+                    else:
+                        from titan.runtime import load
+                        entry = str(asset_root / "titan" / "runtime.py")
+
                     ns = load(entry, as_main=True)
                     app = ns.get("app") if isinstance(ns, dict) else None
                     if app is not None:
