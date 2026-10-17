@@ -14,6 +14,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python 3.11 (Chaquopy buildPython)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Fetch full Python engine
         run: |
           set -e
@@ -35,7 +40,6 @@ jobs:
             find /tmp/engine -maxdepth 3; exit 1
           fi
 
-          # Optional V80.1.2 nervous patches (skip if PLACEHOLDER or missing)
           if [ -d patches ]; then
             mkdir -p app/src/main/python/titan/layers/analysis app/src/main/python/titan/layers/ui
             apply_one() {
@@ -49,13 +53,9 @@ jobs:
             apply_one patches/v79_win11_glass_dashboard.py.gz.b64 app/src/main/python/titan/layers/ui/v79_win11_glass_dashboard.py
           fi
 
-          # Ensure bootstrap from repo is present (not overwritten by zip if zip lacks it)
-          if [ -f app/src/main/python/titan_bootstrap.py ]; then
-            echo "bootstrap ok"
-          else
-            echo "WARNING: titan_bootstrap.py missing after extract"
+          if [ ! -f app/src/main/python/titan_bootstrap.py ]; then
+            echo "ERROR: titan_bootstrap.py missing"; ls -la app/src/main/python/; exit 1
           fi
-
           test -f app/src/main/python/titan/runtime.py
           COUNT=$(find app/src/main/python -name "*.py" | wc -l)
           echo "py count=$COUNT"
@@ -97,29 +97,28 @@ jobs:
           "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
           echo "sdk.dir=$SDK_ROOT" > local.properties
 
-      - name: Gradle wrapper
+      - name: Gradle wrapper (official distribution)
         run: |
           set -e
-          mkdir -p gradle/wrapper
-          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar
-          curl -fsSL -o gradlew https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew
+          # Install a local Gradle to generate a correct wrapper (avoid broken raw gradlew)
+          curl -fsSL -o /tmp/gradle-8.7-bin.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          sudo unzip -q /tmp/gradle-8.7-bin.zip -d /opt
+          /opt/gradle-8.7/bin/gradle wrapper --gradle-version 8.7
           chmod +x gradlew
-          printf '%s\n' \
-            'distributionBase=GRADLE_USER_HOME' \
-            'distributionPath=wrapper/dists' \
-            'distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip' \
-            'networkTimeout=120000' \
-            'validateDistributionUrl=true' \
-            'zipStoreBase=GRADLE_USER_HOME' \
-            'zipStorePath=wrapper/dists' \
-            > gradle/wrapper/gradle-wrapper.properties
+          ./gradlew --version
 
       - name: Build Debug APK
         env:
           GRADLE_OPTS: -Xmx4g -Dorg.gradle.daemon=false
-        run: ./gradlew clean assembleDebug --stacktrace --no-daemon
+        run: |
+          set -o pipefail
+          ./gradlew clean assembleDebug --stacktrace --no-daemon --info 2>&1 | tee /tmp/gradle-build.log
+          # Always surface the real error near the end
+          echo "===== GRADLE TAIL ====="
+          tail -n 80 /tmp/gradle-build.log || true
 
       - name: Name APK
+        if: success()
         run: |
           set -e
           APK="app/build/outputs/apk/debug/app-debug.apk"
@@ -128,8 +127,17 @@ jobs:
           ls -lh "app/build/outputs/apk/debug/TITAN-PRO-V80.1.2.apk"
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: TITAN-PRO-V80.1.2-APK
           path: app/build/outputs/apk/debug/TITAN-PRO-V80.1.2.apk
           if-no-files-found: error
+
+      - name: Upload gradle log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: /tmp/gradle-build.log
+          if-no-files-found: ignore
