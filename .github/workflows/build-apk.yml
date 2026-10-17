@@ -14,13 +14,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prefer Groovy build.gradle (Chaquopy python block)
+      - name: Prefer Groovy build.gradle
         run: |
           set -e
           rm -f app/build.gradle.kts
           test -f app/build.gradle
 
-      - name: Set up Python 3.11 (Chaquopy buildPython)
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -29,7 +29,6 @@ jobs:
         run: |
           set -e
           mkdir -p app/src/main/python
-          # Keep checkout bootstrap
           cp -f app/src/main/python/titan_bootstrap.py /tmp/titan_bootstrap.py
 
           if [ ! -f titan-v80-python-engine.zip ]; then
@@ -46,7 +45,6 @@ jobs:
             find /tmp/engine -maxdepth 3; exit 1
           fi
 
-          # Restore bootstrap (must not be overwritten)
           cp -f /tmp/titan_bootstrap.py app/src/main/python/titan_bootstrap.py
 
           test -f app/src/main/python/titan/runtime.py
@@ -55,52 +53,7 @@ jobs:
           echo "py count=$COUNT"
           if [ "$COUNT" -lt 50 ]; then echo "incomplete engine"; exit 1; fi
 
-          # Patch runtime.py for Chaquopy AssetFinder (open works, pathlib often fails)
-          python3 << 'PY'
-          from pathlib import Path
-          p = Path("app/src/main/python/titan/runtime.py")
-          raw = p.read_text(encoding="utf-8")
-          raw = raw.replace(
-              'LAYER_DIR = Path(__file__).resolve().parent / "layers"',
-              'LAYER_DIR = Path(__file__).parent / "layers"  # Chaquopy: no resolve()',
-          )
-          raw = raw.replace(
-              '"__file__": str(Path(entry_file).resolve()),',
-              '"__file__": str(entry_file),',
-          )
-          old = '''        path = LAYER_DIR / f"{name}.py"
-        if not path.is_file():
-            raise FileNotFoundError(f"TITAN layer missing: {path}")
-        try:
-            src = path.read_text(encoding="utf-8")
-            code = compile(src, str(path), "exec", flags=_FLAGS, dont_inherit=True)
-        except (OSError, SyntaxError) as exc:
-            raise RuntimeError(f"Failed to load TITAN layer {name}: {exc}") from exc'''
-          new = '''        path = LAYER_DIR / f"{name}.py"
-        path_s = str(path)
-        try:
-            # Chaquopy AssetFinder: open() works; pathlib.read_text/is_file often fails
-            with open(path_s, "r", encoding="utf-8") as _fp:
-                src = _fp.read()
-            code = compile(src, path_s, "exec", flags=_FLAGS, dont_inherit=True)
-        except FileNotFoundError as exc:
-            raise FileNotFoundError(f"TITAN layer missing: {path_s}") from exc
-        except (OSError, SyntaxError) as exc:
-            raise RuntimeError(f"Failed to load TITAN layer {name}: {exc}") from exc'''
-          if old in raw:
-              raw = raw.replace(old, new)
-              print("runtime load-block patched")
-          elif "path_s = str(path)" in raw:
-              print("runtime already patched")
-          else:
-              # Fallback: replace read_text only
-              raw = raw.replace("src = path.read_text(encoding=\"utf-8\")", "src = open(str(path), encoding=\"utf-8\").read()")
-              print("runtime read_text fallback patch")
-          p.write_text(raw, encoding="utf-8")
-          # Verify core layer present
-          core = Path("app/src/main/python/titan/layers/core/bootstrap_storage.py")
-          print("bootstrap_storage exists", core.is_file(), core.stat().st_size if core.is_file() else 0)
-          PY
+          python3 scripts/patch_runtime_chaquopy.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
