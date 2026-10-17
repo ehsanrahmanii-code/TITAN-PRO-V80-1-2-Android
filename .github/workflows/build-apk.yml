@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Fetch full Python engine + Chaquopy patches
+      - name: Fetch full Python engine + layer zip
         run: |
           set -e
           mkdir -p app/src/main/python
@@ -45,10 +45,18 @@ jobs:
             find /tmp/engine -maxdepth 3; exit 1
           fi
 
+          # Restore bootstrap
           cp -f /tmp/titan_bootstrap.py app/src/main/python/titan_bootstrap.py
 
           test -f app/src/main/python/titan/runtime.py
           test -f app/src/main/python/titan/layers/core/bootstrap_storage.py
+
+          # Bundle layers as zip so device can extract to real filesystem
+          # (Chaquopy AssetFinder cannot open nested layer paths reliably)
+          (cd app/src/main/python && rm -f titan_layers.zip && zip -r titan_layers.zip titan -x "*.pyc" -x "*__pycache__*")
+          ls -lh app/src/main/python/titan_layers.zip
+          python3 -c "import zipfile; z=zipfile.ZipFile('app/src/main/python/titan_layers.zip'); assert any('bootstrap_storage' in n for n in z.namelist()); print('zip ok', len(z.namelist()))"
+
           COUNT=$(find app/src/main/python -name "*.py" | wc -l)
           echo "py count=$COUNT"
           if [ "$COUNT" -lt 50 ]; then echo "incomplete engine"; exit 1; fi
