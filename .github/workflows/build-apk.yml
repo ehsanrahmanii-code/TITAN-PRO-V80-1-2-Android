@@ -14,6 +14,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prefer Groovy build.gradle (Chaquopy python block)
+        run: |
+          set -e
+          # Kotlin DSL cannot resolve Chaquopy python{} — use Groovy only
+          rm -f app/build.gradle.kts
+          test -f app/build.gradle
+          echo "Using app/build.gradle"
+          head -40 app/build.gradle
+
       - name: Set up Python 3.11 (Chaquopy buildPython)
         uses: actions/setup-python@v5
         with:
@@ -38,19 +47,6 @@ jobs:
             cp -a /tmp/engine/titan app/src/main/python/
           else
             find /tmp/engine -maxdepth 3; exit 1
-          fi
-
-          if [ -d patches ]; then
-            mkdir -p app/src/main/python/titan/layers/analysis app/src/main/python/titan/layers/ui
-            apply_one() {
-              local src="$1" dst="$2"
-              if [ -f "$src" ] && ! grep -q PLACEHOLDER "$src"; then
-                base64 -d "$src" | gzip -d > "$dst" && echo "patched $dst"
-              fi
-            }
-            apply_one patches/asset_analysis.py.gz.b64 app/src/main/python/titan/layers/analysis/asset_analysis.py
-            apply_one patches/v75_deep_coin_analysis.py.gz.b64 app/src/main/python/titan/layers/ui/v75_deep_coin_analysis.py
-            apply_one patches/v79_win11_glass_dashboard.py.gz.b64 app/src/main/python/titan/layers/ui/v79_win11_glass_dashboard.py
           fi
 
           if [ ! -f app/src/main/python/titan_bootstrap.py ]; then
@@ -97,10 +93,9 @@ jobs:
           "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
           echo "sdk.dir=$SDK_ROOT" > local.properties
 
-      - name: Gradle wrapper (official distribution)
+      - name: Gradle wrapper
         run: |
           set -e
-          # Install a local Gradle to generate a correct wrapper (avoid broken raw gradlew)
           curl -fsSL -o /tmp/gradle-8.7-bin.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
           sudo unzip -q /tmp/gradle-8.7-bin.zip -d /opt
           /opt/gradle-8.7/bin/gradle wrapper --gradle-version 8.7
@@ -112,10 +107,9 @@ jobs:
           GRADLE_OPTS: -Xmx4g -Dorg.gradle.daemon=false
         run: |
           set -o pipefail
-          ./gradlew clean assembleDebug --stacktrace --no-daemon --info 2>&1 | tee /tmp/gradle-build.log
-          # Always surface the real error near the end
+          ./gradlew clean assembleDebug --stacktrace --no-daemon 2>&1 | tee /tmp/gradle-build.log
           echo "===== GRADLE TAIL ====="
-          tail -n 80 /tmp/gradle-build.log || true
+          tail -n 100 /tmp/gradle-build.log || true
 
       - name: Name APK
         if: success()
